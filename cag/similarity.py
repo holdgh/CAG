@@ -1,7 +1,8 @@
 from sentence_transformers import SentenceTransformer, util
 
 # Use a lightweight sentence-transformer
-bert_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+# bert_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+bert_model = SentenceTransformer(r"E:\aiModel\llmModel\all-MiniLM-L6-v2")
 
 
 def bert(response, ground_truth):
