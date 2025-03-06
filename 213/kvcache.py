@@ -15,9 +15,9 @@ logger = logging.getLogger(__name__)
 from dotenv import load_dotenv
 load_dotenv()
 
-# HF_TOKEN = os.getenv("HF_TOKEN")
-# if not HF_TOKEN:
-#     raise ValueError("HF_TOKEN not found")
+HF_TOKEN = os.getenv("HF_TOKEN")
+if not HF_TOKEN:
+    raise ValueError("HF_TOKEN not found")
 
 
 """Hugging Face Llama model"""
@@ -38,10 +38,10 @@ torch.serialization.add_safe_globals([set])
 
 def generate(
     model,
-    input_ids: torch.Tensor,  # 问题向量
-    past_key_values,  # 知识的注意力键值信息，又称为知识的kv缓存
+    input_ids: torch.Tensor,
+    past_key_values,
     max_new_tokens: int = 300
-) -> torch.Tensor:  # rag的理念：基于问题检索数据，将数据和问题一同放入提示词中给到大模型，生成回答。cag的理念：将知识通过大模型生成知识对应的kv缓存【放入文件中】，直接将知识对应的kv缓存和问题给到大模型，生成回答。
+) -> torch.Tensor:
     """
     Generate text with greedy decoding.
 
@@ -62,19 +62,24 @@ def generate(
 
     with torch.no_grad():
         for _ in range(max_new_tokens):
+            model_t1 = time()
             outputs = model(
                 input_ids=next_token, 
                 past_key_values=past_key_values,
                 use_cache=True
             )
+            model_t2 = time()
+            print(f"predict one token time: {model_t2 - model_t1},")
             next_token_logits = outputs.logits[:, -1, :]
             next_token = next_token_logits.argmax(dim=-1).unsqueeze(-1)
             next_token = next_token.to(embed_device)
 
-            past_key_values = outputs.past_key_values  # 生成一个token后，更新知识的kv缓存
+            past_key_values = outputs.past_key_values
 
+            cat_t1 = time()
             output_ids = torch.cat([output_ids, next_token], dim=1)
-
+            cat_t2 = time()
+            print(f"cat one token time: {cat_t2 - cat_t1},")
             # if next_token.item() in model.config.eos_token_id:
             if next_token.item() == model.config.eos_token_id:
                 break
@@ -97,11 +102,8 @@ def preprocess_knowledge(
         DynamicCache: KV Cache
     """
     embed_device = model.model.embed_tokens.weight.device
-    input_ids = tokenizer.encode(prompt, return_tensors="pt").to(embed_device)  # prompt在这里是除了问答对话提示词中问题外的所有内容，也即上下文知识。这里将知识进行分词，并放入cpu中，返回分词后的tensor
-    '''
-    众所周知，Transformers库实现中为节约计算时间，会将之前计算的注意力的键与值缓存下来，从而起到加速解码的作用，对应的键与值储存在输出的past_key_values中。在实际应用中，如果已有之前文本的past_key_values，想要继续进行文本生成，则可以只输入新的input_ids与之前的past_key_values，就可以继续进行生成。
-    '''
-    past_key_values = DynamicCache()  # 初始化一个动态缓存对象，大模型
+    input_ids = tokenizer.encode(prompt, return_tensors="pt").to(embed_device)
+    past_key_values = DynamicCache()
     with torch.no_grad():
         outputs = model(
             input_ids=input_ids,
@@ -110,7 +112,7 @@ def preprocess_knowledge(
             output_attentions=False,
             output_hidden_states=False
         )
-    return outputs.past_key_values  # 将知识对应的注意力键值信息输出
+    return outputs.past_key_values
 
 
 def write_kv_cache(kv: DynamicCache, path: str):
@@ -158,12 +160,12 @@ def prepare_kvcache(documents, filepath: str = "./data_cache/cache_knowledges.pt
     ------------------------------------------------
     {answer_instruction}
     Question:
-    """  # 将选中的5篇文章内容，连同answer_instruction一并放入knowledges【下称“知识”】中
+    """
     # Get the knowledge cache
     t1 = time()
-    kv = preprocess_knowledge(model, tokenizer, knowledges)  # 利用大模型处理知识，得到知识的注意力键值信息
+    kv = preprocess_knowledge(model, tokenizer, knowledges)
     print("kvlen: ", kv.key_cache[0].shape[-2])
-    write_kv_cache(kv, filepath)  # 将知识的注意力键值信息写入文件
+    write_kv_cache(kv, filepath)
     t2 = time()
     logger.info(f"KV cache prepared in {t2 - t1:.2f} seconds.")
     return kv, t2 - t1
@@ -171,12 +173,12 @@ def prepare_kvcache(documents, filepath: str = "./data_cache/cache_knowledges.pt
 
 def kvcache_test(args: argparse.Namespace):
     answer_instruction = "Answer the question with a super short answer."
-    text_list, dataset = cagds.get(args.dataset, max_knowledge=args.maxKnowledge, max_paragraph=args.maxParagraph, max_questions=args.maxQuestion)  # 获取文章列表和问答对列表
+    text_list, dataset = cagds.get(args.dataset, max_knowledge=args.maxKnowledge, max_paragraph=args.maxParagraph, max_questions=args.maxQuestion)
 
-    kvcache_path = "./data_cache/cache_knowledges.pt"  # 声明缓存数据路径
+    kvcache_path = "./data_cache/cache_knowledges.pt"
 
-    knowledges = '\n\n\n\n\n\n'.join(text_list)  # 将文章列表【若有5篇文章，则文章列表有10个元素，5个标题和5个文章】拼接为整个字符串，用6个换行符分隔
-    knowledge_cache, prepare_time = prepare_kvcache(knowledges, filepath=kvcache_path, answer_instruction=answer_instruction)  # 利用大模型获取知识上下文的注意力键值信息
+    knowledges = '\n\n\n\n\n\n'.join(text_list)
+    knowledge_cache, prepare_time = prepare_kvcache(knowledges, filepath=kvcache_path, answer_instruction=answer_instruction)
     kv_len = knowledge_cache.key_cache[0].shape[-2]
     print(f"KVcache prepared in {prepare_time} seconds")
     with open(args.output, "a") as f:
@@ -189,14 +191,14 @@ def kvcache_test(args: argparse.Namespace):
         "prompts": [],
         "responses": []
     }
-    # 将问答集转换为列表
+
     dataset = list(dataset)  # Convert the dataset to a list
 
-    max_questions = min(len(dataset), args.maxQuestion) if args.maxQuestion is not None else len(dataset)  # 设置最大问题数量
+    max_questions = min(len(dataset), args.maxQuestion) if args.maxQuestion is not None else len(dataset)
     # Retrieve the knowledge from the vector database
-    for id, (question, ground_truth) in enumerate(dataset[:max_questions]):  # 处理前max_questions个问答对
-        torch.cuda.empty_cache()  # 清空gpu缓存
-        torch.cuda.ipc_collect()  # 收集gpu缓存
+    for id, (question, ground_truth) in enumerate(dataset[:max_questions]):
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
 
         # Read the knowledge cache from the cache file
         cache_t1 = time()
@@ -209,7 +211,7 @@ def kvcache_test(args: argparse.Namespace):
         cache_t2 = time()
 
         # Generate Response for the question
-        knowledges = '\n\n\n'.join(text_list)  # 将文章列表拼接为知识
+        knowledges = '\n\n\n'.join(text_list)
 
         if args.usePrompt:
             prompt = f"""
@@ -231,17 +233,16 @@ def kvcache_test(args: argparse.Namespace):
             output = generate(model, input_ids, DynamicCache()) 
             generated_text = tokenizer.decode(output[0], skip_special_tokens=True, temperature=None)
             generate_t2 = time()
-        else:  # 参数中usePrompt为False
-            # 此时prompt仅为问题
+        else:
             prompt = f"""
     {question}<|eot_id|>
     <|start_header_id|>assistant<|end_header_id|>
     """
             generate_t1 = time()
-            clean_up(knowledge_cache, kv_len)  # 将知识的注意力键值信息【kvcache】截断为特定长度
-            input_ids = tokenizer.encode(prompt, return_tensors="pt").to(model.device)  # 将问题转化为大模型的输入tensor
-            output = generate(model, input_ids, knowledge_cache)  # 利用知识的注意力键值信息【已经计算好的知识上下文的kvcache】回答问题
-            generated_text = tokenizer.decode(output[0], skip_special_tokens=True, temperature=None)  # 解码输出结果，转换为文字
+            clean_up(knowledge_cache, kv_len)
+            input_ids = tokenizer.encode(prompt, return_tensors="pt").to(model.device)
+            output = generate(model, input_ids, knowledge_cache)
+            generated_text = tokenizer.decode(output[0], skip_special_tokens=True, temperature=None)
             generate_t2 = time()
 
         # print("D: ", knowledges)
@@ -249,7 +250,7 @@ def kvcache_test(args: argparse.Namespace):
         print("A: ", generated_text)
  
         # Evaluate bert-score similarity
-        similarity = cagsim.bert(generated_text, ground_truth)  # 计算生成答案与数据集中答案的相似度
+        similarity = cagsim.bert(generated_text, ground_truth)
 
         print(f"[{id}]: Semantic Similarity: {round(similarity, 5)},",
               f"cache time: {cache_t2 - cache_t1},",
@@ -322,18 +323,6 @@ def load_quantized_model(model_name, hf_token=None):
 
 
 if __name__ == "__main__":
-
-    '''
-    --kvcache file 缓存方式【文件 or 变量】
-    --dataset "squad-train" 数据集
-    --similarity bertscore 相似度
-    --maxKnowledge 5 最大知识数量【？】
-    --maxParagraph 100 最大段落数量【长度？】
-    --maxQuestion 1000 最大问题数量【长度？】
-    --modelname "meta-llama/Llama-3.1-8B-Instruct" llm 
-    --randomSeed 0 随机种子
-    --output "./result_kvcache.txt" 输出结果到文件
-    '''
     parser = argparse.ArgumentParser(description="Run RAG test with specified parameters.")
     # parser.add_argument('--method', choices=['rag', 'kvcache'], required=True, help='Method to use (rag or kvcache)')
     # parser.add_argument('--kvcache', choices=['file', 'variable'], required=True, help='Method to use (from_file or from_var)')
@@ -360,9 +349,9 @@ if __name__ == "__main__":
     model_name = args.modelname
     rand_seed = args.randomSeed if args.randomSeed is not None else None
 
-    # if args.quantized:
-        # tokenizer, model = load_quantized_model(model_name=model_name, hf_token=HF_TOKEN)
-    # else:
+    if args.quantized:
+        tokenizer, model = load_quantized_model(model_name=model_name, hf_token=HF_TOKEN)
+    else:
         # tokenizer = AutoTokenizer.from_pretrained(model_name, token=HF_TOKEN)
         # model = AutoModelForCausalLM.from_pretrained(
         #     model_name,
@@ -370,20 +359,20 @@ if __name__ == "__main__":
         #     device_map="auto",
         #     token=HF_TOKEN
         # )
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForCausalLM.from_pretrained(
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        model = AutoModelForCausalLM.from_pretrained(
             model_name,
             torch_dtype=torch.float16,
             device_map="auto"
         )
 
-    def unique_path(path, i=0):  # 返回唯一路径
-        if os.path.exists(path):  # 存在路径时，继续递归，生成新的路径
+    def unique_path(path, i=0):
+        if os.path.exists(path):
             # path = path.split("_")[:-1] if i != 0 else path
             return unique_path(path + "_" + str(i), i + 1)
-        return path  # 不存在路径时，直接返回
+        return path
 
     if os.path.exists(args.output):
-        args.output = unique_path(args.output)  # 获取唯一输出路径
+        args.output = unique_path(args.output)
 
-    kvcache_test(args)  # cag测试主程序
+    kvcache_test(args)
